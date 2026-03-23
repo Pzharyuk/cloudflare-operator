@@ -126,10 +126,14 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 func (r *Reconciler) reconcileTunnel(ingresses []crd.TunnelIngress) {
 	rules := make([]cloudflare.TunnelIngressRule, 0, len(ingresses)+1)
 	for _, ti := range ingresses {
+		originReq := map[string]any{}
+		if strings.HasPrefix(ti.Spec.Service, "https://") {
+			originReq["noTLSVerify"] = true
+		}
 		rules = append(rules, cloudflare.TunnelIngressRule{
 			Hostname:      ti.Spec.Hostname,
 			Service:       ti.Spec.Service,
-			OriginRequest: map[string]any{},
+			OriginRequest: originReq,
 		})
 	}
 	// Sort for deterministic ordering
