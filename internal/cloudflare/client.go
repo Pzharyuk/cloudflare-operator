@@ -227,6 +227,8 @@ func (c *Client) EnsureAccessAppDomains(appID string, domains []string) error {
 	body := map[string]any{
 		"self_hosted_domains": domains,
 		"domain":             domains[0],
+		"type":               app.Type,
+		"name":               app.Name,
 	}
 	_, err = c.request("PUT", url, body)
 	if err == nil {
