@@ -57,10 +57,10 @@ func LoadFromEnv() (*AccountRegistry, error) {
 	// deployments working without any configuration changes.
 	if token := os.Getenv("CF_API_TOKEN"); token != "" {
 		accountID := os.Getenv("CF_ACCOUNT_ID")
-		tunnelID := os.Getenv("CF_TUNNEL_ID")
+		tunnelID := os.Getenv("CF_TUNNEL_ID") // optional — operator will auto-create if empty
 		zoneID := os.Getenv("CF_ZONE_ID")
-		if accountID == "" || tunnelID == "" || zoneID == "" {
-			return nil, fmt.Errorf("legacy account: CF_ACCOUNT_ID, CF_TUNNEL_ID, and CF_ZONE_ID are required when CF_API_TOKEN is set")
+		if accountID == "" || zoneID == "" {
+			return nil, fmt.Errorf("legacy account: CF_ACCOUNT_ID and CF_ZONE_ID are required when CF_API_TOKEN is set")
 		}
 		entry := &accountEntry{
 			cfg: AccountConfig{
@@ -101,11 +101,11 @@ func LoadFromEnv() (*AccountRegistry, error) {
 		p := envPrefix + nameUpper + "_"
 		token := os.Getenv(p + "API_TOKEN")
 		accountID := os.Getenv(p + "ACCOUNT_ID")
-		tunnelID := os.Getenv(p + "TUNNEL_ID")
+		tunnelID := os.Getenv(p + "TUNNEL_ID") // optional — operator will auto-create if empty
 		zoneID := os.Getenv(p + "ZONE_ID")
-		if token == "" || accountID == "" || tunnelID == "" || zoneID == "" {
-			return nil, fmt.Errorf("account %q: %sAPI_TOKEN, %sACCOUNT_ID, %sTUNNEL_ID, and %sZONE_ID are all required",
-				nameLower, p, p, p, p)
+		if token == "" || accountID == "" || zoneID == "" {
+			return nil, fmt.Errorf("account %q: %sAPI_TOKEN, %sACCOUNT_ID, and %sZONE_ID are required",
+				nameLower, p, p, p)
 		}
 		entry := &accountEntry{
 			cfg: AccountConfig{
@@ -163,6 +163,14 @@ func (r *AccountRegistry) Get(name string) (*AccountConfig, *Client, error) {
 		return nil, nil, fmt.Errorf("account %q not found; configured: %v", name, r.Names())
 	}
 	return &e.cfg, e.client, nil
+}
+
+// SetTunnelID updates the tunnel ID for a named account in memory.
+// Called after auto-creating a tunnel at startup so the reconciler can use it.
+func (r *AccountRegistry) SetTunnelID(name, tunnelID string) {
+	if e, ok := r.accounts[name]; ok {
+		e.cfg.TunnelID = tunnelID
+	}
 }
 
 // Resolve determines which account name to use for a TunnelIngress.
