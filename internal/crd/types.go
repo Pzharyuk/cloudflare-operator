@@ -41,6 +41,10 @@ type TunnelIngressSpec struct {
 	Hostname string `json:"hostname"`
 	// Service is the backend URL (e.g., http://argocd-server.argocd.svc.cluster.local:80)
 	Service string `json:"service"`
+	// Account selects which Cloudflare account to use for this ingress.
+	// Must match a name configured via CF_ACCOUNT_<NAME>_* env vars (case-insensitive).
+	// If omitted, the operator matches by hostname domain suffix or falls back to the default account.
+	Account string `json:"account,omitempty"`
 	// Access configures Cloudflare Access protection
 	Access *AccessSpec `json:"access,omitempty"`
 	// DNS configures the DNS record (defaults to proxied CNAME)
