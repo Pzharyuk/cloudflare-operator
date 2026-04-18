@@ -18,13 +18,15 @@ import (
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
-	apiToken := requireEnv("CF_API_TOKEN")
-	accountID := requireEnv("CF_ACCOUNT_ID")
-	tunnelID := requireEnv("CF_TUNNEL_ID")
-	zoneID := requireEnv("CF_ZONE_ID")
-	accessAppID := os.Getenv("CF_ACCESS_APP_ID") // optional
-
-	cf := cloudflare.NewClient(apiToken, accountID)
+	// Load all Cloudflare account credentials from environment variables.
+	// Supports both the legacy single-account format (CF_API_TOKEN, etc.) and
+	// multi-account format (CF_ACCOUNT_<NAME>_API_TOKEN, etc.).
+	registry, err := cloudflare.LoadFromEnv()
+	if err != nil {
+		slog.Error("load Cloudflare accounts", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Cloudflare accounts loaded", "accounts", registry.Names())
 
 	k8sCfg, err := rest.InClusterConfig()
 	if err != nil {
@@ -32,15 +34,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	reconciler, err := controller.New(
-		controller.Config{
-			TunnelID:    tunnelID,
-			ZoneID:      zoneID,
-			AccessAppID: accessAppID,
-		},
-		cf,
-		k8sCfg,
-	)
+	reconciler, err := controller.New(registry, k8sCfg)
 	if err != nil {
 		slog.Error("init reconciler", "error", err)
 		os.Exit(1)
@@ -59,15 +53,6 @@ func main() {
 
 	intervalSec := envInt("RECONCILE_INTERVAL", 30)
 	reconciler.Run(ctx, time.Duration(intervalSec)*time.Second)
-}
-
-func requireEnv(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		slog.Error("required env var not set", "key", key)
-		os.Exit(1)
-	}
-	return v
 }
 
 func envInt(key string, def int) int {

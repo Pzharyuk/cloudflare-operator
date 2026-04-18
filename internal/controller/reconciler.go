@@ -19,30 +19,27 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-type Config struct {
-	TunnelID    string
-	ZoneID      string
-	AccessAppID string
-}
-
+// Reconciler watches TunnelIngress CRDs and keeps Cloudflare tunnel config,
+// DNS records, and Access policies in sync. It supports multiple Cloudflare
+// accounts via an AccountRegistry — each TunnelIngress is processed through
+// the account selected by spec.account or hostname domain matching.
 type Reconciler struct {
-	cfg       Config
-	cf        *cloudflare.Client
+	registry  *cloudflare.AccountRegistry
 	dynClient dynamic.Interface
 	gvr       schema.GroupVersionResource
 	publicIP  string
 	mu        sync.Mutex
 }
 
-func New(cfg Config, cf *cloudflare.Client, k8sCfg *rest.Config) (*Reconciler, error) {
+// New creates a Reconciler using the given AccountRegistry for Cloudflare API calls.
+func New(registry *cloudflare.AccountRegistry, k8sCfg *rest.Config) (*Reconciler, error) {
 	dynClient, err := dynamic.NewForConfig(k8sCfg)
 	if err != nil {
 		return nil, fmt.Errorf("dynamic client: %w", err)
 	}
 
 	return &Reconciler{
-		cfg:       cfg,
-		cf:        cf,
+		registry:  registry,
 		dynClient: dynClient,
 		gvr: schema.GroupVersionResource{
 			Group:    crd.Group,
@@ -53,7 +50,7 @@ func New(cfg Config, cf *cloudflare.Client, k8sCfg *rest.Config) (*Reconciler, e
 }
 
 func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
-	slog.Info("reconciler starting", "interval", interval, "tunnelID", r.cfg.TunnelID, "zoneID", r.cfg.ZoneID)
+	slog.Info("reconciler starting", "interval", interval, "accounts", r.registry.Names())
 
 	// Initial reconcile
 	r.reconcile(ctx)
@@ -90,18 +87,16 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 	var ingresses []crd.TunnelIngress
 	for _, item := range list.Items {
 		var ti crd.TunnelIngress
-		raw, _ := item.MarshalJSON()
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &ti); err != nil {
 			slog.Error("parse TunnelIngress", "name", item.GetName(), "error", err)
 			continue
 		}
-		_ = raw
 		ingresses = append(ingresses, ti)
 	}
 
 	slog.Info("reconciling", "ingressCount", len(ingresses))
 
-	// Detect public IP
+	// Detect public IP change
 	r.mu.Lock()
 	if ip, err := cloudflare.GetPublicIP(); err == nil && ip != r.publicIP {
 		slog.Info("public IP changed", "old", r.publicIP, "new", ip)
@@ -110,20 +105,49 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 	currentIP := r.publicIP
 	r.mu.Unlock()
 
-	// 1. Reconcile tunnel config
-	r.reconcileTunnel(ingresses)
+	// Group ingresses by resolved account, then reconcile each account independently.
+	// This ensures tunnel configs, DNS records, and Access policies are scoped to
+	// the correct Cloudflare account for each ingress.
+	groups := r.groupByAccount(ingresses)
+	for accountName, accountIngresses := range groups {
+		cfg, cf, err := r.registry.Get(accountName)
+		if err != nil {
+			slog.Error("get account for reconcile", "account", accountName, "error", err)
+			continue
+		}
+		r.reconcileTunnel(accountIngresses, cfg, cf)
+		r.reconcileDNS(accountIngresses, cfg, cf)
+		r.reconcileAccess(accountIngresses, cfg, cf, currentIP)
+	}
 
-	// 2. Reconcile DNS records
-	r.reconcileDNS(ingresses)
-
-	// 3. Reconcile Access policies
-	r.reconcileAccess(ingresses, currentIP)
-
-	// 4. Update status on each TunnelIngress
 	r.updateStatuses(ctx, ingresses, currentIP)
 }
 
-func (r *Reconciler) reconcileTunnel(ingresses []crd.TunnelIngress) {
+// groupByAccount resolves the Cloudflare account for each TunnelIngress and groups
+// them by account name. Ingresses that cannot be resolved are skipped with a warning.
+//
+// Resolution order (per registry.Resolve):
+//  1. spec.account field (explicit)
+//  2. Hostname domain suffix matching against account ZoneDomains
+//  3. Default account fallback
+func (r *Reconciler) groupByAccount(ingresses []crd.TunnelIngress) map[string][]crd.TunnelIngress {
+	groups := make(map[string][]crd.TunnelIngress)
+	for _, ti := range ingresses {
+		accountName, err := r.registry.Resolve(ti.Spec.Account, ti.Spec.Hostname)
+		if err != nil {
+			slog.Warn("skipping ingress: cannot resolve account",
+				"name", ti.Name, "namespace", ti.Namespace,
+				"hostname", ti.Spec.Hostname, "error", err)
+			continue
+		}
+		groups[accountName] = append(groups[accountName], ti)
+	}
+	return groups
+}
+
+// reconcileTunnel pushes the full tunnel ingress rule set for one account's ingresses.
+// Existing rules not represented by a TunnelIngress are removed (declarative).
+func (r *Reconciler) reconcileTunnel(ingresses []crd.TunnelIngress, cfg *cloudflare.AccountConfig, cf *cloudflare.Client) {
 	rules := make([]cloudflare.TunnelIngressRule, 0, len(ingresses)+1)
 	for _, ti := range ingresses {
 		originReq := map[string]any{}
@@ -142,29 +166,32 @@ func (r *Reconciler) reconcileTunnel(ingresses []crd.TunnelIngress) {
 	rules = append(rules, cloudflare.TunnelIngressRule{Service: "http_status:404"})
 
 	config := &cloudflare.TunnelConfig{Ingress: rules}
-	if err := r.cf.PutTunnelConfig(r.cfg.TunnelID, config); err != nil {
-		slog.Error("update tunnel config", "error", err)
+	if err := cf.PutTunnelConfig(cfg.TunnelID, config); err != nil {
+		slog.Error("update tunnel config", "account", cfg.Name, "tunnelID", cfg.TunnelID, "error", err)
 	}
 }
 
-func (r *Reconciler) reconcileDNS(ingresses []crd.TunnelIngress) {
+// reconcileDNS ensures a CNAME DNS record exists for each ingress hostname.
+func (r *Reconciler) reconcileDNS(ingresses []crd.TunnelIngress, cfg *cloudflare.AccountConfig, cf *cloudflare.Client) {
 	for _, ti := range ingresses {
 		proxied := true
 		if ti.Spec.DNS != nil && ti.Spec.DNS.Proxied != nil {
 			proxied = *ti.Spec.DNS.Proxied
 		}
-		if err := r.cf.EnsureDNSRecord(r.cfg.ZoneID, ti.Spec.Hostname, r.cfg.TunnelID, proxied); err != nil {
-			slog.Error("ensure DNS record", "hostname", ti.Spec.Hostname, "error", err)
+		if err := cf.EnsureDNSRecord(cfg.ZoneID, ti.Spec.Hostname, cfg.TunnelID, proxied); err != nil {
+			slog.Error("ensure DNS record", "account", cfg.Name, "hostname", ti.Spec.Hostname, "error", err)
 		}
 	}
 }
 
-func (r *Reconciler) reconcileAccess(ingresses []crd.TunnelIngress, publicIP string) {
-	if r.cfg.AccessAppID == "" {
+// reconcileAccess syncs the Cloudflare Access app domains and bypass policy for
+// ingresses that have Access enabled. No-ops if the account has no AccessAppID.
+func (r *Reconciler) reconcileAccess(ingresses []crd.TunnelIngress, cfg *cloudflare.AccountConfig, cf *cloudflare.Client, publicIP string) {
+	if cfg.AccessAppID == "" {
 		return
 	}
 
-	// Collect all hostnames that need Access protection
+	// Collect hostnames that need Access protection and IPs for the bypass policy
 	var accessDomains []string
 	var bypassIPs []string
 	needsBypass := false
@@ -189,29 +216,27 @@ func (r *Reconciler) reconcileAccess(ingresses []crd.TunnelIngress, publicIP str
 
 	sort.Strings(accessDomains)
 
-	// Update Access app domains
-	if err := r.cf.EnsureAccessAppDomains(r.cfg.AccessAppID, accessDomains); err != nil {
-		slog.Error("update Access app domains", "error", err)
+	if err := cf.EnsureAccessAppDomains(cfg.AccessAppID, accessDomains); err != nil {
+		slog.Error("update Access app domains", "account", cfg.Name, "error", err)
 	}
 
-	// Update bypass policy
 	if needsBypass && len(bypassIPs) > 0 {
-		// Deduplicate IPs
+		// Deduplicate and normalize IPs to CIDR notation
 		seen := make(map[string]bool)
 		var uniqueIPs []string
 		for _, ip := range bypassIPs {
+			if !strings.Contains(ip, "/") {
+				ip = ip + "/32"
+			}
 			if !seen[ip] {
 				seen[ip] = true
-				if !strings.Contains(ip, "/") {
-					ip = ip + "/32"
-				}
 				uniqueIPs = append(uniqueIPs, ip)
 			}
 		}
 		sort.Strings(uniqueIPs)
 
-		if err := r.cf.EnsureAccessBypassPolicy(r.cfg.AccessAppID, uniqueIPs); err != nil {
-			slog.Error("update Access bypass policy", "error", err)
+		if err := cf.EnsureAccessBypassPolicy(cfg.AccessAppID, uniqueIPs); err != nil {
+			slog.Error("update Access bypass policy", "account", cfg.Name, "error", err)
 		}
 	}
 }
@@ -231,11 +256,6 @@ func (r *Reconciler) updateStatuses(ctx context.Context, ingresses []crd.TunnelI
 			status["accessConfigured"] = true
 		}
 
-		patch := map[string]any{"status": status}
-		patchBytes, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(&patch)
-		_ = patchBytes
-
-		// Update via dynamic client
 		obj, err := r.dynClient.Resource(r.gvr).Namespace(ti.Namespace).Get(ctx, ti.Name, metav1.GetOptions{})
 		if err != nil {
 			continue

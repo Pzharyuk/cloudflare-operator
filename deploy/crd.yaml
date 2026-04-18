@@ -22,6 +22,11 @@ spec:
                 service:
                   type: string
                   description: Backend URL (e.g., http://svc.ns.svc.cluster.local:80)
+                account:
+                  type: string
+                  description: >
+                    Cloudflare account name (case-insensitive, matches CF_ACCOUNT_<NAME>_* env var prefix).
+                    If omitted, the operator matches by hostname domain suffix or uses the default account.
                 access:
                   type: object
                   properties:
