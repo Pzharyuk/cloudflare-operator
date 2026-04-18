@@ -34,12 +34,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	reconciler, err := controller.New(registry, k8sCfg)
-	if err != nil {
-		slog.Error("init reconciler", "error", err)
-		os.Exit(1)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -50,6 +44,21 @@ func main() {
 		slog.Info("shutting down")
 		cancel()
 	}()
+
+	// Ensure each account has a registered Cloudflare tunnel before starting the
+	// reconciler. Accounts with no TUNNEL_ID will have a tunnel auto-created and
+	// the token stored in a K8s Secret for cloudflared to consume.
+	namespace := os.Getenv("OPERATOR_NAMESPACE")
+	if namespace == "" {
+		namespace = "cloudflare-operator"
+	}
+	controller.EnsureTunnels(ctx, registry, k8sCfg, namespace)
+
+	reconciler, err := controller.New(registry, k8sCfg)
+	if err != nil {
+		slog.Error("init reconciler", "error", err)
+		os.Exit(1)
+	}
 
 	intervalSec := envInt("RECONCILE_INTERVAL", 30)
 	reconciler.Run(ctx, time.Duration(intervalSec)*time.Second)

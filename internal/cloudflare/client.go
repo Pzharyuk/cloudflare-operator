@@ -1,6 +1,8 @@
 package cloudflare
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,7 +67,76 @@ func (c *Client) request(method, url string, body interface{}) (json.RawMessage,
 	return result.Result, nil
 }
 
-// --- Tunnel ---
+// --- Tunnel Management ---
+
+// Tunnel represents a Cloudflare Tunnel resource.
+type Tunnel struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"` // e.g. "inactive", "healthy", "degraded"
+	Token  string `json:"token"`  // JWT token; only populated by CreateTunnel (not by List/Get)
+}
+
+// CreateTunnel creates a new named tunnel under this account.
+// A random 32-byte secret is generated to register the tunnel with Cloudflare.
+// The returned Tunnel.Token is the JWT cloudflared needs to authenticate — it is only
+// returned at creation time, so the caller must persist it immediately.
+func (c *Client) CreateTunnel(name string) (*Tunnel, error) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, fmt.Errorf("generate tunnel secret: %w", err)
+	}
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel", c.accountID)
+	body := map[string]any{
+		"name":          name,
+		"tunnel_secret": base64.StdEncoding.EncodeToString(secret),
+	}
+	data, err := c.request("POST", url, body)
+	if err != nil {
+		return nil, err
+	}
+	var tunnel Tunnel
+	json.Unmarshal(data, &tunnel)
+	slog.Info("tunnel created", "name", tunnel.Name, "id", tunnel.ID)
+	return &tunnel, nil
+}
+
+// ListTunnels returns all active (non-deleted) tunnels for this account.
+// Note: the Token field is not included in list results — only CreateTunnel returns a token.
+func (c *Client) ListTunnels() ([]Tunnel, error) {
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel?is_deleted=false", c.accountID)
+	data, err := c.request("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	var tunnels []Tunnel
+	json.Unmarshal(data, &tunnels)
+	return tunnels, nil
+}
+
+// GetTunnel retrieves a specific tunnel by ID.
+func (c *Client) GetTunnel(tunnelID string) (*Tunnel, error) {
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel/%s", c.accountID, tunnelID)
+	data, err := c.request("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	var tunnel Tunnel
+	json.Unmarshal(data, &tunnel)
+	return &tunnel, nil
+}
+
+// DeleteTunnel deletes a tunnel by ID. The tunnel must have no active connections.
+func (c *Client) DeleteTunnel(tunnelID string) error {
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel/%s", c.accountID, tunnelID)
+	_, err := c.request("DELETE", url, nil)
+	if err == nil {
+		slog.Info("tunnel deleted", "id", tunnelID)
+	}
+	return err
+}
+
+// --- Tunnel Ingress Config ---
 
 type TunnelIngressRule struct {
 	Hostname      string         `json:"hostname,omitempty"`
