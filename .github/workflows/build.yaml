@@ -36,3 +36,11 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  notify:
+    needs: [build]
+    if: always()
+    uses: Pzharyuk/.github/.github/workflows/notify-telegram.yml@main
+    with:
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || (contains(needs.*.result, 'cancelled') && 'cancelled' || 'success') }}
+    secrets: inherit
