@@ -58,6 +58,11 @@ type AccessSpec struct {
 	BypassPublicIP bool `json:"bypassPublicIP"`
 	// AdditionalBypassIPs are extra IPs to add to the bypass policy
 	AdditionalBypassIPs []string `json:"additionalBypassIPs,omitempty"`
+	// AdditionalAllowedEmails are emails to add to the "allow specific
+	// users" policy on the Access app. Aggregated across all ingresses
+	// of the same account; the operator upserts a single auto-managed
+	// allow policy from the deduplicated set. Skipped if empty.
+	AdditionalAllowedEmails []string `json:"additionalAllowedEmails,omitempty"`
 }
 
 type DNSSpec struct {
@@ -106,6 +111,10 @@ func (in *TunnelIngress) DeepCopyInto(out *TunnelIngress) {
 		if in.Spec.Access.AdditionalBypassIPs != nil {
 			out.Spec.Access.AdditionalBypassIPs = make([]string, len(in.Spec.Access.AdditionalBypassIPs))
 			copy(out.Spec.Access.AdditionalBypassIPs, in.Spec.Access.AdditionalBypassIPs)
+		}
+		if in.Spec.Access.AdditionalAllowedEmails != nil {
+			out.Spec.Access.AdditionalAllowedEmails = make([]string, len(in.Spec.Access.AdditionalAllowedEmails))
+			copy(out.Spec.Access.AdditionalAllowedEmails, in.Spec.Access.AdditionalAllowedEmails)
 		}
 	}
 	if in.Spec.DNS != nil {

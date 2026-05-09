@@ -352,6 +352,52 @@ func (c *Client) EnsureAccessBypassPolicy(appID string, ips []string) error {
 	return err
 }
 
+// EnsureAccessAllowEmailsPolicy upserts an "allow" policy on the Access
+// app whose include list is exactly the given email addresses. The
+// existing manually-created "Allow specific users" policy is also
+// matched so an operator rollout adopts it without leaving two
+// conflicting allow policies in place.
+func (c *Client) EnsureAccessAllowEmailsPolicy(appID string, emails []string) error {
+	policiesURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/access/apps/%s/policies", c.accountID, appID)
+	data, err := c.request("GET", policiesURL, nil)
+	if err != nil {
+		return err
+	}
+	var policies []AccessPolicy
+	json.Unmarshal(data, &policies)
+
+	includes := make([]PolicyRule, len(emails))
+	for i, e := range emails {
+		includes[i] = PolicyRule{"email": map[string]any{"email": e}}
+	}
+
+	policy := map[string]any{
+		"name":       "Auto-managed allowed users",
+		"decision":   "allow",
+		"include":    includes,
+		"exclude":    []any{},
+		"require":    []any{},
+		"precedence": 2,
+	}
+
+	for _, p := range policies {
+		if p.Name == "Auto-managed allowed users" || p.Name == "Allow specific users" {
+			url := fmt.Sprintf("%s/%s", policiesURL, p.ID)
+			_, err = c.request("PUT", url, policy)
+			if err == nil {
+				slog.Info("Access allow-emails policy updated", "emails", emails)
+			}
+			return err
+		}
+	}
+
+	_, err = c.request("POST", policiesURL, policy)
+	if err == nil {
+		slog.Info("Access allow-emails policy created", "emails", emails)
+	}
+	return err
+}
+
 // --- Public IP ---
 
 func GetPublicIP() (string, error) {

@@ -191,9 +191,11 @@ func (r *Reconciler) reconcileAccess(ingresses []crd.TunnelIngress, cfg *cloudfl
 		return
 	}
 
-	// Collect hostnames that need Access protection and IPs for the bypass policy
+	// Collect hostnames that need Access protection, IPs for the bypass
+	// policy, and emails for the allow policy.
 	var accessDomains []string
 	var bypassIPs []string
+	var allowedEmails []string
 	needsBypass := false
 
 	if publicIP != "" {
@@ -207,6 +209,7 @@ func (r *Reconciler) reconcileAccess(ingresses []crd.TunnelIngress, cfg *cloudfl
 				needsBypass = true
 			}
 			bypassIPs = append(bypassIPs, ti.Spec.Access.AdditionalBypassIPs...)
+			allowedEmails = append(allowedEmails, ti.Spec.Access.AdditionalAllowedEmails...)
 		}
 	}
 
@@ -237,6 +240,25 @@ func (r *Reconciler) reconcileAccess(ingresses []crd.TunnelIngress, cfg *cloudfl
 
 		if err := cf.EnsureAccessBypassPolicy(cfg.AccessAppID, uniqueIPs); err != nil {
 			slog.Error("update Access bypass policy", "account", cfg.Name, "error", err)
+		}
+	}
+
+	// Allow-emails policy. Skipped when the list is empty so a misconfig
+	// can't lock everyone out — the operator will leave any existing
+	// allow policy alone and surface the issue via missing entries.
+	if len(allowedEmails) > 0 {
+		seen := make(map[string]bool)
+		var uniqueEmails []string
+		for _, e := range allowedEmails {
+			if !seen[e] {
+				seen[e] = true
+				uniqueEmails = append(uniqueEmails, e)
+			}
+		}
+		sort.Strings(uniqueEmails)
+
+		if err := cf.EnsureAccessAllowEmailsPolicy(cfg.AccessAppID, uniqueEmails); err != nil {
+			slog.Error("update Access allow-emails policy", "account", cfg.Name, "error", err)
 		}
 	}
 }
